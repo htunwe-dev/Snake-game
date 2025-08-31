@@ -104,7 +104,6 @@ playerRef.onDisconnect().remove();
 const chatBox=document.getElementById("chatBox");
 const chatInput=document.getElementById("chatInput");
 chatBox.innerHTML='Click "/" to type';
-
 function sendMessage(msg){
   if(msg.length>0){
     db.ref("chat").push({name:playerName,color:color,text:msg,time:Date.now()});
@@ -131,19 +130,37 @@ function spawnFood(){
 }
 for(let i=0;i<150;i++) spawnFood();
 
-// Update player to Firebase
-function updatePlayer(){
-  playerRef.set({
-    name:playerName,
-    color:color,
-    length:snake.length,
-    radius:snake.radius,
-    body:snake.segments,
-    rainbowColors:snake.rainbowColors,
-    invincible:snake.invincible,
-    lastActive:Date.now()
-  });
+// Throttled player update
+let lastPlayerUpdate = 0;
+function maybeUpdatePlayer(){
+    const now = Date.now();
+    if(now - lastPlayerUpdate > 100){ // 10 updates/sec
+        playerRef.set({
+            name:playerName,
+            color:color,
+            length:snake.length,
+            radius:snake.radius,
+            body:snake.segments,
+            rainbowColors:snake.rainbowColors,
+            invincible:snake.invincible,
+            lastActive:Date.now()
+        });
+        lastPlayerUpdate = now;
+    }
 }
+
+// Ping measurement
+let lastPingTime = 0;
+let ping = 0;
+function measurePing(){
+    lastPingTime = Date.now();
+    const pingRef = db.ref(".info/serverTimeOffset");
+    pingRef.once("value").then(snapshot=>{
+        const offset = snapshot.val() || 0;
+        ping = Date.now() - lastPingTime + offset;
+    });
+}
+setInterval(measurePing, 1000);
 
 // Controls
 window.addEventListener("keydown",e=>{
@@ -206,7 +223,7 @@ function checkCollision(){
 
       for(let i=0;i<p.body.length;i++){
         const seg = p.body[i];
-        if(p.invincible) continue; // pass through invincible players
+        if(p.invincible) continue;
         if(Math.hypot(seg.x-snake.x, seg.y-snake.y) < snake.radius + (p.radius||5)){
           dieAndReturnToMenu();
           return;
@@ -216,10 +233,25 @@ function checkCollision(){
   }
 }
 
-// Die → menu
+// Die → drop food and return to menu (optimized)
 function dieAndReturnToMenu(){
+  if(!snake.dead){
+    const dropCount = Math.min(snake.length, 20); // max 20 food
+    for(let i=0;i<dropCount;i++){
+      const fType = {color:"yellow",size:6,grow:Math.ceil(snake.length/dropCount)};
+      foods.push({
+        x:snake.x + (Math.random()-0.5)*50,
+        y:snake.y + (Math.random()-0.5)*50,
+        size:fType.size,
+        color:fType.color,
+        grow:fType.grow
+      });
+    }
+  }
   snake.dead=true;
   gameStarted=false;
+  snake.segments = [];
+  playerRef.remove();
   document.getElementById("menu").style.display="block";
 }
 
@@ -247,9 +279,9 @@ function gameLoop(){
   foods.forEach((f,i)=>{
     const dist=Math.hypot(f.x-snake.x, f.y-snake.y);
     if(dist<snake.radius+f.size/2){
-      snake.length += f.grow; // different grow rate
+      snake.length += f.grow;
       foods.splice(i,1);
-      spawnFood(); // respawn automatically
+      spawnFood();
     }
     ctx.beginPath(); ctx.fillStyle=f.color; ctx.arc(f.x,f.y,f.size,0,Math.PI*2); ctx.fill();
   });
@@ -264,26 +296,26 @@ function gameLoop(){
 
   // Draw other players
   for(let id in allPlayers){
-    const p=allPlayers[id]; if(!p.body) continue;
+    const p=allPlayers[id]; 
+    if(!p.body) continue;
     for(let i=0;i<p.body.length;i++){
-      const seg = p.body[i];
+      const seg=p.body[i];
       ctx.beginPath();
-      ctx.fillStyle = (p.invincible && p.rainbowColors && p.rainbowColors[i]) ? p.rainbowColors[i] : p.color||"white";
+      ctx.fillStyle = (p.invincible && p.rainbowColors && p.rainbowColors[i]) ? p.rainbowColors[i] : (p.color||"white");
       ctx.arc(seg.x,seg.y,p.radius||5,0,Math.PI*2); ctx.fill();
     }
     if(p.body.length>0){
       const head=p.body[0];
-      ctx.font="bold 20px Arial"; ctx.lineWidth=4;
-      ctx.strokeStyle="white";
+      ctx.font="bold 20px Arial"; ctx.lineWidth=4; ctx.strokeStyle="white";
       ctx.strokeText(p.name||"New Player", head.x, head.y-15);
       ctx.fillStyle=p.color||"white"; ctx.fillText(p.name||"New Player", head.x, head.y-15);
     }
   }
 
   ctx.restore();
-  if(!snake.dead) updatePlayer();
+  if(!snake.dead) maybeUpdatePlayer();
   drawMiniMap();
-  document.getElementById("fpsPing").textContent=`FPS: ${fps} | Ping: 0ms`;
+  document.getElementById("fpsPing").textContent=`FPS: ${fps} | Ping: ${ping}ms`;
   if(gameStarted) requestAnimationFrame(gameLoop);
 }
 
@@ -307,14 +339,10 @@ function drawMiniMap(){
   ctx.restore();
 }
 
-// Leaderboard
-db.ref("players").on("value",snap=>{
-  allPlayers=snap.val()||{};
-  updateLeaderboard();
-});
+// Leaderboard sorted by size & auto-refresh every 30s
 function updateLeaderboard(){
   const scores=document.getElementById("scores"); scores.innerHTML="";
-  Object.values(allPlayers||{}).filter(p=>p.length>0).sort((a,b)=>b.length-b.length)
+  Object.values(allPlayers||{}).filter(p=>p.length>0).sort((a,b)=>b.length-a.length)
     .forEach(p=>{
       const tr=document.createElement("tr");
       const td1=document.createElement("td"); td1.textContent=p.name||"New Player"; td1.style.color=p.color||"white";
@@ -322,8 +350,13 @@ function updateLeaderboard(){
       tr.appendChild(td1); tr.appendChild(td2); scores.appendChild(tr);
     });
 }
+db.ref("players").on("value",snap=>{
+  allPlayers=snap.val()||{};
+  updateLeaderboard();
+});
+setInterval(()=>{ db.ref("players").once("value").then(snap=>{ allPlayers=snap.val()||{}; updateLeaderboard(); }); },30000);
 
-// Chat focus
+// Chat
 document.addEventListener("keydown",e=>{
   if(e.key==="/" && document.activeElement!==chatInput){ e.preventDefault(); chatInput.focus(); }
   if(e.key==="Enter" && document.activeElement===chatInput){ sendMessage(chatInput.value.trim()); }
