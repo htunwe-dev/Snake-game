@@ -37,7 +37,7 @@
 <canvas id="gameCanvas"></canvas>
 
 <div id="menu">
-  <h1>HMA the snake.io</h1>
+  <h1>HMA the Snake.io</h1>
   <input id="playerName" placeholder="Enter your name"/><br><br>
   <input type="color" id="playerColor" value="#00ff00"/><br><br>
   <button id="startBtn">Start Game</button>
@@ -83,13 +83,13 @@ let snake = {
   y: MAP_HEIGHT/2,
   dx: 2,
   dy: 0,
-  segments: [{x:MAP_WIDTH/2, y:MAP_HEIGHT/2}],
-  length: 5,
+  segments: [],
+  length: 20,
   radius: 5,
   dead: true,
   speed: 2,
   invincible: false,
-  rainbowColors: [] // for each segment
+  rainbowColors: []
 };
 let foods = [], allPlayers = {}, gameStarted = false;
 let playerName="New Player", color="#00ff00";
@@ -117,17 +117,32 @@ db.ref("chat").orderByChild("time").startAt(Date.now()).on("child_added",snap=>{
   chatBox.scrollTop = chatBox.scrollHeight;
 });
 
-// Spawn foods
+// Spawn foods with different growth
 function spawnFood(){
-  const types=[{color:"red",size:5},{color:"yellow",size:10},{color:"blue",size:8},{color:"lime",size:6},{color:"orange",size:12}];
+  const types=[
+    {color:"red",size:5,grow:1},
+    {color:"yellow",size:10,grow:3},
+    {color:"blue",size:8,grow:2},
+    {color:"lime",size:6,grow:1},
+    {color:"orange",size:12,grow:4}
+  ];
   const f=types[Math.floor(Math.random()*types.length)];
-  foods.push({x:Math.random()*MAP_WIDTH,y:Math.random()*MAP_HEIGHT,size:f.size,color:f.color});
+  foods.push({x:Math.random()*MAP_WIDTH,y:Math.random()*MAP_HEIGHT,size:f.size,color:f.color,grow:f.grow});
 }
 for(let i=0;i<150;i++) spawnFood();
 
-// Update player
+// Update player to Firebase
 function updatePlayer(){
-  playerRef.set({name:playerName,color:color,length:snake.length,radius:snake.radius,body:snake.segments,lastActive:Date.now()});
+  playerRef.set({
+    name:playerName,
+    color:color,
+    length:snake.length,
+    radius:snake.radius,
+    body:snake.segments,
+    rainbowColors:snake.rainbowColors,
+    invincible:snake.invincible,
+    lastActive:Date.now()
+  });
 }
 
 // Controls
@@ -155,21 +170,24 @@ document.getElementById("startBtn").onclick = () => {
 // Reset snake
 function resetSnake(rainbow=false){
   snake.dead=false;
-  snake.length=5; snake.radius=5; snake.speed=2;
-  snake.x = MAP_WIDTH/2; snake.y = MAP_HEIGHT/2; snake.dx = snake.speed; snake.dy = 0;
-  snake.segments=[{x:MAP_WIDTH/2,y:MAP_HEIGHT/2}];
+  snake.length=20; 
+  snake.radius=5;
+  snake.x = MAP_WIDTH/2; 
+  snake.y = MAP_HEIGHT/2; 
+  snake.dx = snake.speed; 
+  snake.dy = 0;
+  snake.segments = Array(snake.length).fill({x:snake.x,y:snake.y});
   snake.rainbowColors = [];
   if(rainbow){
     snake.invincible = true;
     let start = Date.now();
     let colors = ["red","orange","yellow","green","blue","indigo","violet"];
     let interval = setInterval(()=>{
-      if(Date.now()-start>4000){ 
-        snake.invincible=false; 
+      if(Date.now()-start > 4000){ 
+        snake.invincible = false; 
         snake.rainbowColors=[]; 
         clearInterval(interval);
       } else {
-        // assign random colors for **all segments**
         snake.rainbowColors = snake.segments.map(()=>colors[Math.floor(Math.random()*colors.length)]);
       }
     },50);
@@ -179,13 +197,17 @@ function resetSnake(rainbow=false){
 // Collision
 function checkCollision(){
   if(!snake.invincible){
-    if(snake.x<=0||snake.x>=MAP_WIDTH||snake.y<=0||snake.y>=MAP_HEIGHT){ dieAndReturnToMenu(); }
+    if(snake.x <= 0 || snake.x >= MAP_WIDTH || snake.y <= 0 || snake.y >= MAP_HEIGHT){ dieAndReturnToMenu(); }
+
     for(let id in allPlayers){
       if(id===playerId) continue;
-      const p=allPlayers[id]; if(!p.body) continue;
+      const p = allPlayers[id];
+      if(!p.body) continue;
+
       for(let i=0;i<p.body.length;i++){
         const seg = p.body[i];
-        if(Math.hypot(seg.x-snake.x, seg.y-snake.y)<snake.radius+(p.radius||5)){
+        if(p.invincible) continue; // pass through invincible players
+        if(Math.hypot(seg.x-snake.x, seg.y-snake.y) < snake.radius + (p.radius||5)){
           dieAndReturnToMenu();
           return;
         }
@@ -221,12 +243,11 @@ function gameLoop(){
     if(snake.segments.length>snake.length*2) snake.segments.pop();
   }
 
-  // Eat food + respawn
+  // Eat food
   foods.forEach((f,i)=>{
     const dist=Math.hypot(f.x-snake.x, f.y-snake.y);
     if(dist<snake.radius+f.size/2){
-      snake.length+=Math.ceil(f.size/2);
-      snake.radius = Math.min(20, snake.radius + Math.ceil(f.size/5));
+      snake.length += f.grow; // different grow rate
       foods.splice(i,1);
       spawnFood(); // respawn automatically
     }
@@ -237,22 +258,23 @@ function gameLoop(){
   for(let i=0;i<snake.segments.length;i++){
     const seg = snake.segments[i];
     ctx.beginPath();
-    if(snake.invincible && snake.rainbowColors[i]){
-      ctx.fillStyle = snake.rainbowColors[i];
-    } else {
-      ctx.fillStyle = color;
-    }
+    ctx.fillStyle = (snake.invincible && snake.rainbowColors[i]) ? snake.rainbowColors[i] : color;
     ctx.arc(seg.x,seg.y,snake.radius,0,Math.PI*2); ctx.fill();
   }
 
   // Draw other players
   for(let id in allPlayers){
     const p=allPlayers[id]; if(!p.body) continue;
-    ctx.fillStyle = p.color||"white";
-    p.body.forEach(seg=>{ ctx.beginPath(); ctx.arc(seg.x,seg.y,p.radius||5,0,Math.PI*2); ctx.fill(); });
+    for(let i=0;i<p.body.length;i++){
+      const seg = p.body[i];
+      ctx.beginPath();
+      ctx.fillStyle = (p.invincible && p.rainbowColors && p.rainbowColors[i]) ? p.rainbowColors[i] : p.color||"white";
+      ctx.arc(seg.x,seg.y,p.radius||5,0,Math.PI*2); ctx.fill();
+    }
     if(p.body.length>0){
       const head=p.body[0];
-      ctx.font="bold 20px Arial"; ctx.lineWidth=4; ctx.strokeStyle="white";
+      ctx.font="bold 20px Arial"; ctx.lineWidth=4;
+      ctx.strokeStyle="white";
       ctx.strokeText(p.name||"New Player", head.x, head.y-15);
       ctx.fillStyle=p.color||"white"; ctx.fillText(p.name||"New Player", head.x, head.y-15);
     }
